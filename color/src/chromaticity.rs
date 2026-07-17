@@ -54,6 +54,69 @@ impl Chromaticity {
         y: 0.33767,
     };
 
+    /// Approximate the chromaticity of a Planckian radiator at a temperature in kelvin.
+    ///
+    /// This uses the approximation by [Kang et al.], which is defined for temperatures from
+    /// 1667 K through 25,000 K. Returns `None` when `kelvin` is outside that range or is not finite.
+    ///
+    /// A light source's correlated color temperature (CCT) identifies the nearest point on the
+    /// Planckian locus. A real light source may have a chromaticity offset from the value returned
+    /// here. CCT also does not specify the source's luminance or spectral distribution.
+    ///
+    /// # Example
+    ///
+    /// Convert a 2700 K chromaticity at unit luminance to linear sRGB without chromatic adaptation:
+    ///
+    /// ```rust
+    /// use color::{Chromaticity, ColorSpace, LinearSrgb, XyzD65};
+    ///
+    /// let chromaticity =
+    ///     Chromaticity::try_from_kelvin(2700.).expect("2700 K is within the supported range");
+    /// let xyz = chromaticity.with_luminance(1.);
+    /// let linear_srgb = XyzD65::convert_absolute::<LinearSrgb>(xyz.components);
+    ///
+    /// assert!(linear_srgb.iter().all(|component| component.is_finite()));
+    /// ```
+    ///
+    /// [Kang et al.]: https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART000987865
+    #[must_use]
+    #[expect(
+        clippy::excessive_precision,
+        reason = "Preserve Kang et al.'s published coefficients."
+    )]
+    pub const fn try_from_kelvin(kelvin: f32) -> Option<Self> {
+        if !kelvin.is_finite() {
+            return None;
+        }
+        // Keep these as separate conditions so this remains const on the MSRV.
+        if kelvin < 1667. {
+            return None;
+        }
+        if kelvin > 25_000. {
+            return None;
+        }
+
+        // Kang et al. express these polynomials in powers of 1000 / kelvin.
+        let t = 1000. / kelvin;
+        let t2 = t * t;
+        let x = if kelvin <= 4000. {
+            0.179_910 + 0.877_695_6 * t - 0.234_358_9 * t2 - 0.266_123_9 * t2 * t
+        } else {
+            0.240_390 + 0.222_634_7 * t + 2.107_037_9 * t2 - 3.025_846_9 * t2 * t
+        };
+
+        let x2 = x * x;
+        let y = if kelvin <= 2222. {
+            -0.202_196_83 + 2.185_558_32 * x - 1.348_110_20 * x2 - 1.106_381_4 * x2 * x
+        } else if kelvin <= 4000. {
+            -0.167_488_67 + 2.091_370_15 * x - 1.374_185_93 * x2 - 0.954_947_6 * x2 * x
+        } else {
+            -0.370_014_83 + 3.751_129_97 * x - 5.873_386_7 * x2 + 3.081_758_0 * x2 * x
+        };
+
+        Some(Self { x, y })
+    }
+
     /// Get the color at this chromaticity with the given `luminance`.
     ///
     /// If you convert the color returned by this method to another color space, think carefully
@@ -163,6 +226,51 @@ mod tests {
     #[must_use]
     fn almost_equal<CS: ColorSpace>(col1: [f32; 3], col2: [f32; 3], absolute_epsilon: f32) -> bool {
         OpaqueColor::<CS>::new(col1).difference(OpaqueColor::new(col2)) <= absolute_epsilon
+    }
+
+    #[test]
+    fn kelvin_domain() {
+        assert!(Chromaticity::try_from_kelvin(1667.).is_some());
+        assert!(Chromaticity::try_from_kelvin(25_000.).is_some());
+
+        for kelvin in [
+            f32::NEG_INFINITY,
+            -1.,
+            0.,
+            1666.9,
+            25_000.1,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            assert!(
+                Chromaticity::try_from_kelvin(kelvin).is_none(),
+                "{kelvin} K should be outside the supported range"
+            );
+        }
+    }
+
+    #[test]
+    fn kelvin_reference_values() {
+        // Cross-check the three polynomial regions. The values at 2856 K and above are also used
+        // by Android's Kang et al. implementation:
+        // https://android.googlesource.com/platform/cts/+/c5e94267c2a3b26e45334c348fae7fab0a7fd04f/tests/tests/graphics/src/android/graphics/cts/ColorSpaceTest.java
+        for (kelvin, expected_xyz) in [
+            (2000., [1.274_975_5, 1., 0.144_780_1]),
+            (2856., [1.097_082_4, 1., 0.356_852_5]),
+            (6504., [0.968_573, 1., 1.121_644_4]),
+            (24_761., [1.000_648_5, 1., 1.960_453_7]),
+        ] {
+            let chromaticity = Chromaticity::try_from_kelvin(kelvin)
+                .expect("reference temperature should be within the supported range");
+            assert!(
+                almost_equal::<XyzD65>(
+                    chromaticity.with_luminance(1.).components,
+                    expected_xyz,
+                    1e-6,
+                ),
+                "unexpected chromaticity at {kelvin} K"
+            );
+        }
     }
 
     #[test]
